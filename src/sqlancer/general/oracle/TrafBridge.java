@@ -24,14 +24,8 @@ public final class TrafBridge implements AutoCloseable {
     private final BufferedWriter stdin;
     private final BufferedReader stdout;
 
-    public TrafBridge(Path trafRepo, String condaEnv) throws IOException {
-        ProcessBuilder pb;
-        if (condaEnv != null && !condaEnv.isEmpty()) {
-            pb = new ProcessBuilder("conda", "run", "--no-capture-output", "-n", condaEnv, "python", "-u", "-m",
-                    "interpreter.sqlancer_bridge");
-        } else {
-            pb = new ProcessBuilder("python", "-u", "-m", "interpreter.sqlancer_bridge");
-        }
+    public TrafBridge(Path trafRepo) throws IOException {
+        ProcessBuilder pb = new ProcessBuilder("python", "-u", "-m", "interpreter.sqlancer_bridge");
         pb.directory(trafRepo.toFile());
         pb.redirectErrorStream(false);
         this.process = pb.start();

@@ -82,7 +82,6 @@ public class GeneralTrafTestSuiteOracle implements TestOracle<GeneralGlobalState
     }
 
     private final GeneralGlobalState state;
-    private final String condaEnv;
     private final String trafEngine;
     private final Path outputDir;
     private final int suiteSize;
@@ -97,7 +96,6 @@ public class GeneralTrafTestSuiteOracle implements TestOracle<GeneralGlobalState
         this.trafEngine = mapEngine(opts.getDatabaseEngineFactory().name());
         this.outputDir = Paths.get(opts.trafSuiteOutput).toAbsolutePath();
         this.suiteSize = opts.trafSuiteSize;
-        this.condaEnv = opts.trafCondaEnv;
         try {
             Files.createDirectories(outputDir);
         } catch (IOException e) {
@@ -108,7 +106,7 @@ public class GeneralTrafTestSuiteOracle implements TestOracle<GeneralGlobalState
     private TrafBridge bridge() {
         return BRIDGES.computeIfAbsent(Thread.currentThread().getId(), id -> {
             try {
-                return new TrafBridge(TrafBridge.defaultTrafRepo(), condaEnv);
+                return new TrafBridge(TrafBridge.defaultTrafRepo());
             } catch (IOException e) {
                 throw new RuntimeException("Failed to start traf bridge", e);
             }

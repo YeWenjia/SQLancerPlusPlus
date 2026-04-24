@@ -83,10 +83,7 @@ public class GeneralOptions implements DBMSSpecificOptions<GeneralOptions.Genera
     @Parameter(names = "--traf-suite-size", description = "Stop after N accepted (differentially-matched) traf cases")
     public int trafSuiteSize = 1000;
 
-    @Parameter(names = "--traf-conda-env", description = "Conda env name hosting traf's Python deps")
-    public String trafCondaEnv = "traf";
-
-    public enum GeneralOracleFactory implements OracleFactory<GeneralGlobalState> {
+public enum GeneralOracleFactory implements OracleFactory<GeneralGlobalState> {
         NOREC {
 
             @Override
