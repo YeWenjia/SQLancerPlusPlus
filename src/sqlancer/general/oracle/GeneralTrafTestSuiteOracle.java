@@ -27,8 +27,8 @@ import sqlancer.IgnoreMeException;
 import sqlancer.Main;
 import sqlancer.Randomly;
 import sqlancer.Reproducer;
-import sqlancer.common.query.Query;
-import sqlancer.common.query.SQLQueryAdapter;
+// import sqlancer.common.query.Query;
+// import sqlancer.common.query.SQLQueryAdapter;
 import sqlancer.common.ast.newast.ColumnReferenceNode;
 import sqlancer.common.ast.newast.Node;
 import sqlancer.common.ast.newast.TableReferenceNode;
@@ -261,30 +261,30 @@ public class GeneralTrafTestSuiteOracle implements TestOracle<GeneralGlobalState
      * SQLancer++ logs both successful and failed statements when `loggerPrintFailed=true` (the
      * default). We filter out failed ones so the emitted `setup_sql` replays cleanly.
      */
-    private List<String> collectSetupSql() {
-        List<String> out = new ArrayList<>();
-        List<? extends Query<?>> stmts = state.getState().getStatements();
-        for (Query<?> q : stmts) {
-            if (q instanceof SQLQueryAdapter && ((SQLQueryAdapter) q).getLastErrorMessage() != null) {
-                // Statement failed at execution — don't emit it.
-                continue;
-            }
-            String s = q.getQueryString();
-            if (s == null) {
-                continue;
-            }
-            s = s.trim();
-            if (s.isEmpty()) {
-                continue;
-            }
-            out.add(s);
-        }
-        // Drop the trailing SELECT — it's emitted separately as `sql:`.
-        if (!out.isEmpty() && out.get(out.size() - 1).toUpperCase().startsWith("SELECT")) {
-            out.remove(out.size() - 1);
-        }
-        return out;
-    }
+    // private List<String> collectSetupSql() {
+    //     List<String> out = new ArrayList<>();
+    //     List<? extends Query<?>> stmts = state.getState().getStatements();
+    //     for (Query<?> q : stmts) {
+    //         if (q instanceof SQLQueryAdapter && ((SQLQueryAdapter) q).getLastErrorMessage() != null) {
+    //             // Statement failed at execution — don't emit it.
+    //             continue;
+    //         }
+    //         String s = q.getQueryString();
+    //         if (s == null) {
+    //             continue;
+    //         }
+    //         s = s.trim();
+    //         if (s.isEmpty()) {
+    //             continue;
+    //         }
+    //         out.add(s);
+    //     }
+    //     // Drop the trailing SELECT — it's emitted separately as `sql:`.
+    //     if (!out.isEmpty() && out.get(out.size() - 1).toUpperCase().startsWith("SELECT")) {
+    //         out.remove(out.size() - 1);
+    //     }
+    //     return out;
+    // }
 
     private void writeCrashCase(String sql, String error, String trace) {
         Path dir = outputDir.resolveSibling("traf-crashes");
@@ -551,15 +551,15 @@ public class GeneralTrafTestSuiteOracle implements TestOracle<GeneralGlobalState
                 }
             }
         }
-        List<String> setup = collectSetupSql();
-        if (setup.isEmpty()) {
-            sb.append("setup_sql: []\n");
-        } else {
-            sb.append("setup_sql:\n");
-            for (String s : setup) {
-                sb.append("  - ").append(yamlScalar(s)).append('\n');
-            }
-        }
+        // List<String> setup = collectSetupSql();
+        // if (setup.isEmpty()) {
+        //     sb.append("setup_sql: []\n");
+        // } else {
+        //     sb.append("setup_sql:\n");
+        //     for (String s : setup) {
+        //         sb.append("  - ").append(yamlScalar(s)).append('\n');
+        //     }
+        // }
         sb.append("sql: ").append(yamlScalar(sql)).append('\n');
         if (cols.isEmpty()) {
             sb.append("columns: []\n");
