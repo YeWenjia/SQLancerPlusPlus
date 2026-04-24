@@ -16,6 +16,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
@@ -61,8 +62,27 @@ public class GeneralTrafTestSuiteOracle implements TestOracle<GeneralGlobalState
     private static final AtomicInteger ACCEPTED_COUNT = new AtomicInteger(0);
     private static final AtomicInteger SUITE_INDEX = new AtomicInteger(0);
 
+    /**
+     * Per-thread bridge cache. The oracle is re-created every iteration, but starting a fresh
+     * Python worker per iteration leaks processes and burns ~200 ms of import cost each time.
+     * Keyed by thread id so multi-threaded runs each get their own (the Python worker holds
+     * per-thread schema state that can't be shared).
+     */
+    private static final ConcurrentHashMap<Long, TrafBridge> BRIDGES = new ConcurrentHashMap<>();
+    static {
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            BRIDGES.values().forEach(b -> {
+                try {
+                    b.close();
+                } catch (RuntimeException ignored) {
+                    // best-effort teardown
+                }
+            });
+        }, "traf-bridge-shutdown"));
+    }
+
     private final GeneralGlobalState state;
-    private final TrafBridge bridge;
+    private final String condaEnv;
     private final String trafEngine;
     private final Path outputDir;
     private final int suiteSize;
@@ -77,16 +97,22 @@ public class GeneralTrafTestSuiteOracle implements TestOracle<GeneralGlobalState
         this.trafEngine = mapEngine(opts.getDatabaseEngineFactory().name());
         this.outputDir = Paths.get(opts.trafSuiteOutput).toAbsolutePath();
         this.suiteSize = opts.trafSuiteSize;
+        this.condaEnv = opts.trafCondaEnv;
         try {
             Files.createDirectories(outputDir);
         } catch (IOException e) {
             throw new RuntimeException("Cannot create suite output dir " + outputDir, e);
         }
-        try {
-            this.bridge = new TrafBridge(TrafBridge.defaultTrafRepo(), opts.trafCondaEnv);
-        } catch (IOException e) {
-            throw new RuntimeException("Failed to start traf bridge", e);
-        }
+    }
+
+    private TrafBridge bridge() {
+        return BRIDGES.computeIfAbsent(Thread.currentThread().getId(), id -> {
+            try {
+                return new TrafBridge(TrafBridge.defaultTrafRepo(), condaEnv);
+            } catch (IOException e) {
+                throw new RuntimeException("Failed to start traf bridge", e);
+            }
+        });
     }
 
     private static String mapEngine(String dbms) {
@@ -155,7 +181,7 @@ public class GeneralTrafTestSuiteOracle implements TestOracle<GeneralGlobalState
         // 1. Traf filter.
         TrafBridge.CheckResult ck;
         try {
-            ck = bridge.check(sql);
+            ck = bridge().check(sql);
         } catch (IOException e) {
             throw new RuntimeException("traf bridge error", e);
         }
@@ -185,7 +211,7 @@ public class GeneralTrafTestSuiteOracle implements TestOracle<GeneralGlobalState
         // 3. Execute on traf.
         TrafBridge.RunResult trafRes;
         try {
-            trafRes = bridge.run(sql);
+            trafRes = bridge().run(sql);
         } catch (IOException e) {
             throw new RuntimeException("traf bridge error", e);
         }
@@ -290,7 +316,7 @@ public class GeneralTrafTestSuiteOracle implements TestOracle<GeneralGlobalState
             data.put(t.getName(), fetchRows(t));
         }
         try {
-            bridge.setSchema(trafEngine, tables, data);
+            bridge().setSchema(trafEngine, tables, data);
             lastSchemaVersion = version;
             currentSchemaTables = tables;
             currentSchemaData = data;
