@@ -27,6 +27,8 @@ import sqlancer.IgnoreMeException;
 import sqlancer.Main;
 import sqlancer.Randomly;
 import sqlancer.Reproducer;
+import sqlancer.common.query.Query;
+import sqlancer.common.query.SQLQueryAdapter;
 import sqlancer.common.ast.newast.ColumnReferenceNode;
 import sqlancer.common.ast.newast.Node;
 import sqlancer.common.ast.newast.TableReferenceNode;
@@ -59,7 +61,17 @@ import sqlancer.general.gen.GeneralRandomQuerySynthesizer;
  */
 public class GeneralTrafTestSuiteOracle implements TestOracle<GeneralGlobalState> {
 
-    private static final AtomicInteger ACCEPTED_COUNT = new AtomicInteger(0);
+    /**
+     * Per-database accepted-case budget. Non-static on purpose: the oracle is instantiated once
+     * per database iteration (see ProviderAdapter.generateAndTestDatabase), so this counter
+     * naturally resets whenever SQLancer++ rotates to a fresh database. With suiteSize=100 and
+     * enough --num-queries, each database contributes up to 100 accepted cases to the suite.
+     */
+    private final AtomicInteger acceptedCount = new AtomicInteger(0);
+    /**
+     * Suite-wide filename index. Stays static so case/mismatch/crash files don't collide across
+     * databases or threads.
+     */
     private static final AtomicInteger SUITE_INDEX = new AtomicInteger(0);
 
     /**
@@ -133,8 +145,9 @@ public class GeneralTrafTestSuiteOracle implements TestOracle<GeneralGlobalState
     public void check() throws SQLException {
         reproducer = null;
 
-        if (ACCEPTED_COUNT.get() >= suiteSize) {
-            // Suite target reached; nothing more to do.
+        if (acceptedCount.get() >= suiteSize) {
+            // Per-database suite target reached; skip remaining check() calls for this database.
+            // A fresh oracle (and thus a fresh counter) will be built for the next database.
             throw new IgnoreMeException();
         }
 
@@ -238,7 +251,39 @@ public class GeneralTrafTestSuiteOracle implements TestOracle<GeneralGlobalState
         // 5. Match → write YAML entry.
         int idx = SUITE_INDEX.incrementAndGet();
         writeYaml(outputDir.resolve(String.format("case_%06d.yml", idx)), sql, dbmsCols, dbmsRows, null);
-        ACCEPTED_COUNT.incrementAndGet();
+        acceptedCount.incrementAndGet();
+    }
+
+    /**
+     * Collect DDL/DML statements that produced the current DBMS state. The SELECT under test is
+     * logged into the same list just before the oracle runs, so we drop the trailing SELECT.
+     *
+     * SQLancer++ logs both successful and failed statements when `loggerPrintFailed=true` (the
+     * default). We filter out failed ones so the emitted `setup_sql` replays cleanly.
+     */
+    private List<String> collectSetupSql() {
+        List<String> out = new ArrayList<>();
+        List<? extends Query<?>> stmts = state.getState().getStatements();
+        for (Query<?> q : stmts) {
+            if (q instanceof SQLQueryAdapter && ((SQLQueryAdapter) q).getLastErrorMessage() != null) {
+                // Statement failed at execution — don't emit it.
+                continue;
+            }
+            String s = q.getQueryString();
+            if (s == null) {
+                continue;
+            }
+            s = s.trim();
+            if (s.isEmpty()) {
+                continue;
+            }
+            out.add(s);
+        }
+        // Drop the trailing SELECT — it's emitted separately as `sql:`.
+        if (!out.isEmpty() && out.get(out.size() - 1).toUpperCase().startsWith("SELECT")) {
+            out.remove(out.size() - 1);
+        }
+        return out;
     }
 
     private void writeCrashCase(String sql, String error, String trace) {
@@ -504,6 +549,15 @@ public class GeneralTrafTestSuiteOracle implements TestOracle<GeneralGlobalState
                     }
                     sb.append("]\n");
                 }
+            }
+        }
+        List<String> setup = collectSetupSql();
+        if (setup.isEmpty()) {
+            sb.append("setup_sql: []\n");
+        } else {
+            sb.append("setup_sql:\n");
+            for (String s : setup) {
+                sb.append("  - ").append(yamlScalar(s)).append('\n');
             }
         }
         sb.append("sql: ").append(yamlScalar(sql)).append('\n');
