@@ -472,6 +472,8 @@ public class GeneralProvider extends SQLProviderAdapter<GeneralProvider.GeneralG
         DatabaseEngineFactory<GeneralGlobalState> databaseEngineFactory = globalState.getDbmsSpecificOptions()
                 .getDatabaseEngineFactory();
         // globalState.setCreatingDatabase(true);
+        GeneralSchema.GeneralDataType.trafSafeOnly = globalState.getDbmsSpecificOptions().oracles
+                .contains(sqlancer.general.GeneralOptions.GeneralOracleFactory.TRAF_SUITE);
         GeneralSchema.GeneralDataType.calcWeight();
         for (int i = 0; i < Randomly.fromOptions(1, 2); i++) {
             boolean success;

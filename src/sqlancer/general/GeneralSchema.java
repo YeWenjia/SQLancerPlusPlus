@@ -310,6 +310,13 @@ public class GeneralSchema extends AbstractSchema<GeneralGlobalState, GeneralTab
 
         public static GeneralDataType[] weightTypes = {};
 
+        /**
+         * When true, restrict DDL type generation to traf-representable kinds (INT, STRING).
+         * Enabled when the TRAF_SUITE oracle is active so the generated schema can be mirrored
+         * into traf's limited type system.
+         */
+        public static boolean trafSafeOnly;
+
         public static GeneralDataType getRandomWithoutNull() {
             GeneralDataType dt;
             do {
@@ -324,6 +331,9 @@ public class GeneralSchema extends AbstractSchema<GeneralGlobalState, GeneralTab
             List<GeneralDataType> types = new ArrayList<>();
             for (GeneralDataType dt : GeneralDataType.values()) {
                 if (dt == GeneralDataType.NULL) {
+                    continue;
+                }
+                if (trafSafeOnly && (dt == GeneralDataType.BOOLEAN || dt == GeneralDataType.VARTYPE)) {
                     continue;
                 }
                 if (dt == GeneralDataType.VARTYPE) {

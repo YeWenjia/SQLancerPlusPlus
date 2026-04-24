@@ -21,6 +21,7 @@ import sqlancer.general.GeneralSchema.GeneralTable;
 import sqlancer.general.oracle.GeneralFuzzingOracle;
 import sqlancer.general.oracle.GeneralNoRECOracle;
 import sqlancer.general.oracle.GeneralQueryPartitioningWhere;
+import sqlancer.general.oracle.GeneralTrafTestSuiteOracle;
 
 @Parameters(commandDescription = "General")
 public class GeneralOptions implements DBMSSpecificOptions<GeneralOptions.GeneralOracleFactory> {
@@ -76,6 +77,15 @@ public class GeneralOptions implements DBMSSpecificOptions<GeneralOptions.Genera
     @Parameter(names = "--enable-direct-validation", description = "Enable direct validation", arity = 1)
     public boolean enableDirectValidation;
 
+    @Parameter(names = "--traf-suite-output", description = "Directory for traf-differential YAML test cases")
+    public String trafSuiteOutput = "traf-suite";
+
+    @Parameter(names = "--traf-suite-size", description = "Stop after N accepted (differentially-matched) traf cases")
+    public int trafSuiteSize = 1000;
+
+    @Parameter(names = "--traf-conda-env", description = "Conda env name hosting traf's Python deps")
+    public String trafCondaEnv = "traf";
+
     public enum GeneralOracleFactory implements OracleFactory<GeneralGlobalState> {
         NOREC {
 
@@ -103,6 +113,12 @@ public class GeneralOptions implements DBMSSpecificOptions<GeneralOptions.Genera
             @Override
             public TestOracle<GeneralGlobalState> create(GeneralGlobalState globalState) throws SQLException {
                 return new GeneralFuzzingOracle(globalState);
+            }
+        },
+        TRAF_SUITE {
+            @Override
+            public TestOracle<GeneralGlobalState> create(GeneralGlobalState globalState) throws SQLException {
+                return new GeneralTrafTestSuiteOracle(globalState);
             }
         };
 
