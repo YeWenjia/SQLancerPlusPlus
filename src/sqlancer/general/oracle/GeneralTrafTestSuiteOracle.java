@@ -17,8 +17,10 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -69,10 +71,20 @@ public class GeneralTrafTestSuiteOracle implements TestOracle<GeneralGlobalState
      */
     private final AtomicInteger acceptedCount = new AtomicInteger(0);
     /**
-     * Suite-wide filename index. Stays static so case/mismatch/crash files don't collide across
-     * databases or threads.
+     * Per-category filename index. Stays static so files within a category don't collide across
+     * databases or threads. Each category gets its own counter so numbering is contiguous per
+     * folder.
      */
-    private static final AtomicInteger SUITE_INDEX = new AtomicInteger(0);
+    private static final ConcurrentHashMap<String, AtomicInteger> CATEGORY_INDEX = new ConcurrentHashMap<>();
+
+    private static final String CAT_BENIGN = "benign";
+    private static final String CAT_MISMATCH = "traf-mismatch";
+    private static final String CAT_TRAF_CRASH = "traf-crash";
+    private static final String CAT_DBMS_FAIL = "dbms-fail";
+    private static final String CAT_BOTH_FAIL = "both-fail";
+
+    /** Per-(parent,engine) guard so we wipe stale case folders only once per JVM run. */
+    private static final ConcurrentHashMap<String, AtomicBoolean> CLEANED = new ConcurrentHashMap<>();
 
     /**
      * Per-thread bridge cache. The oracle is re-created every iteration, but starting a fresh
@@ -112,6 +124,47 @@ public class GeneralTrafTestSuiteOracle implements TestOracle<GeneralGlobalState
             Files.createDirectories(outputDir);
         } catch (IOException e) {
             throw new RuntimeException("Cannot create suite output dir " + outputDir, e);
+        }
+        cleanCategoryDirsOnce();
+    }
+
+    /**
+     * Wipe all <engine>-* case folders under the suite parent at startup, so each run begins
+     * with a clean slate and case_NNNNNN.yml numbering matches what's on disk.
+     */
+    private void cleanCategoryDirsOnce() {
+        Path parent = outputDir.getParent();
+        if (parent == null) {
+            parent = outputDir;
+        }
+        String key = parent.toString() + "::" + trafEngine;
+        AtomicBoolean flag = CLEANED.computeIfAbsent(key, k -> new AtomicBoolean(false));
+        if (!flag.compareAndSet(false, true)) {
+            return;
+        }
+        String prefix = trafEngine + "-";
+        if (!Files.isDirectory(parent)) {
+            return;
+        }
+        try (Stream<Path> entries = Files.list(parent)) {
+            entries.filter(Files::isDirectory)
+                    .filter(p -> p.getFileName().toString().startsWith(prefix))
+                    .forEach(GeneralTrafTestSuiteOracle::deleteRecursively);
+        } catch (IOException e) {
+            System.err.println("traf suite cleanup failed for " + parent + ": " + e);
+        }
+    }
+
+    private static void deleteRecursively(Path root) {
+        try (Stream<Path> walk = Files.walk(root)) {
+            walk.sorted(Comparator.reverseOrder()).forEach(p -> {
+                try {
+                    Files.deleteIfExists(p);
+                } catch (IOException ignored) {
+                }
+            });
+        } catch (IOException e) {
+            System.err.println("traf suite cleanup failed for " + root + ": " + e);
         }
     }
 
@@ -204,6 +257,8 @@ public class GeneralTrafTestSuiteOracle implements TestOracle<GeneralGlobalState
         // 2. Execute on real DBMS.
         List<List<Object>> dbmsRows;
         List<String> dbmsCols;
+        boolean isError = false;
+        String dbmsErrorMessage = null;
         try (Statement stmt = state.getConnection().createStatement()) {
             if (state.getOptions().logEachSelect()) {
                 state.getLogger().writeCurrent(sql);
@@ -216,7 +271,12 @@ public class GeneralTrafTestSuiteOracle implements TestOracle<GeneralGlobalState
         } catch (SQLException e) {
             Main.nrUnsuccessfulActions.addAndGet(1);
             state.getLogger().writeCurrent("-- " + e.getMessage());
-            throw new IgnoreMeException();
+            // throw new IgnoreMeException();
+            isError = true;
+            dbmsErrorMessage = e.getMessage();
+            dbmsCols = Collections.emptyList();
+            dbmsRows = Collections.emptyList();
+            // throw new AssertionError("DBMS error occurred: " + dbmsErrorMessage + "\nSQL: " + sql);
         }
 
         // 3. Execute on traf.
@@ -226,32 +286,55 @@ public class GeneralTrafTestSuiteOracle implements TestOracle<GeneralGlobalState
         } catch (IOException e) {
             throw new RuntimeException("traf bridge error", e);
         }
-        if (!trafRes.ok) {
-            // Parse+typecheck accepted but run() failed — candidate traf bug. Persist a case so
-            // it's reproducible, then surface as an assertion so SQLancer++'s normal bug-logging
-            // flow fires.
-            writeCrashCase(sql, trafRes.error, trafRes.trace);
-            String msg = "traf run() failed after successful typecheck.\nSQL: " + sql + "\nError: "
-                    + trafRes.error;
+
+        boolean dbmsOk = !isError;
+        boolean trafOk = trafRes.ok;
+
+        // 4. Bucket the case based on (DBMS, traf) outcome.
+        if (dbmsOk && trafOk) {
+            List<List<String>> dbmsNorm = normalizeRows(dbmsRows);
+            List<List<String>> trafNorm = normalizeTrafRows(trafRes.rows);
+            if (!bagsEqual(dbmsNorm, trafNorm)) {
+                writeCase(CAT_MISMATCH, sql, dbmsCols, dbmsRows, null, trafRes.cols, trafNorm, null, null);
+                String msg = "traf/DBMS result mismatch.\nSQL: " + sql + "\nDBMS cols: " + dbmsCols + "\nDBMS rows: "
+                        + dbmsNorm + "\nTraf cols: " + trafRes.cols + "\nTraf rows: " + trafNorm;
+                reproducer = new MismatchReproducer(msg);
+                throw new AssertionError(msg);
+            }
+            writeCase(CAT_BENIGN, sql, dbmsCols, dbmsRows, null, trafRes.cols, normalizeTrafRows(trafRes.rows), null,
+                    null);
+            acceptedCount.incrementAndGet();
+        } else if (dbmsOk && !trafOk) {
+            // DBMS handled it; traf failed after typecheck — candidate traf bug.
+            writeCase(CAT_TRAF_CRASH, sql, dbmsCols, dbmsRows, null, Collections.emptyList(), Collections.emptyList(),
+                    trafRes.error, trafRes.trace);
+            String msg = "traf run() failed after successful typecheck.\nSQL: " + sql + "\nError: " + trafRes.error;
             reproducer = new MismatchReproducer(msg);
             throw new AssertionError(msg);
+        } else if (!dbmsOk && trafOk) {
+            // DBMS rejected the query but traf accepted — collect for later analysis.
+            writeCase(CAT_DBMS_FAIL, sql, Collections.emptyList(), Collections.emptyList(), dbmsErrorMessage,
+                    trafRes.cols, normalizeTrafRows(trafRes.rows), null, null);
+            throw new AssertionError("DBMS rejected the query but traf accepted." + "\nSQL: " + sql + "\nDBMS error: " + dbmsErrorMessage + "\nTraf cols: " + trafRes.cols
+                    + "\nTraf rows: " + normalizeTrafRows(trafRes.rows));
+        } else {
+            // Both sides rejected the query — usually uninteresting, but kept for completeness.
+            writeCase(CAT_BOTH_FAIL, sql, Collections.emptyList(), Collections.emptyList(), dbmsErrorMessage,
+                    Collections.emptyList(), Collections.emptyList(), trafRes.error, trafRes.trace);
+            throw new IgnoreMeException();
         }
+    }
 
-        // 4. Compare.
-        List<List<String>> dbmsNorm = normalizeRows(dbmsRows);
-        List<List<String>> trafNorm = normalizeTrafRows(trafRes.rows);
-        if (!bagsEqual(dbmsNorm, trafNorm)) {
-            String msg = "traf/DBMS result mismatch.\nSQL: " + sql + "\nDBMS cols: " + dbmsCols + "\nDBMS rows: "
-                    + dbmsNorm + "\nTraf cols: " + trafRes.cols + "\nTraf rows: " + trafNorm;
-            writeMismatchCase(sql, dbmsCols, dbmsRows, trafRes.cols, trafNorm);
-            reproducer = new MismatchReproducer(msg);
-            throw new AssertionError(msg);
+    private Path categoryDir(String category) {
+        Path parent = outputDir.getParent();
+        if (parent == null) {
+            parent = outputDir;
         }
+        return parent.resolve(trafEngine + "-" + category);
+    }
 
-        // 5. Match → write YAML entry.
-        int idx = SUITE_INDEX.incrementAndGet();
-        writeYaml(outputDir.resolve(String.format("case_%06d.yml", idx)), sql, dbmsCols, dbmsRows, null);
-        acceptedCount.incrementAndGet();
+    private static int nextIndex(String category) {
+        return CATEGORY_INDEX.computeIfAbsent(category, k -> new AtomicInteger(0)).incrementAndGet();
     }
 
     /**
@@ -286,44 +369,42 @@ public class GeneralTrafTestSuiteOracle implements TestOracle<GeneralGlobalState
     //     return out;
     // }
 
-    private void writeCrashCase(String sql, String error, String trace) {
-        Path dir = outputDir.resolveSibling("traf-crashes");
+    private void writeCase(String category, String sql, List<String> dbmsCols, List<List<Object>> dbmsRows,
+            String dbmsError, List<String> trafCols, List<List<String>> trafRows, String trafError, String trafTrace) {
+        Path dir = categoryDir(category);
         try {
             Files.createDirectories(dir);
         } catch (IOException ignored) {
         }
-        int idx = SUITE_INDEX.incrementAndGet();
-        Path file = dir.resolve(String.format("crash_%06d.yml", idx));
-        writeYaml(file, sql, Collections.emptyList(), Collections.emptyList(),
-                "kind: traf_run_error\nerror: " + yamlScalar(error) + "\ntrace: " + yamlScalar(trace) + "\n");
-    }
-
-    private void writeMismatchCase(String sql, List<String> dbmsCols, List<List<Object>> dbmsRows,
-            List<String> trafCols, List<List<String>> trafRows) {
-        Path dir = outputDir.resolveSibling("traf-mismatches");
-        try {
-            Files.createDirectories(dir);
-        } catch (IOException ignored) {
-        }
-        int idx = SUITE_INDEX.incrementAndGet();
-        Path file = dir.resolve(String.format("mismatch_%06d.yml", idx));
+        int idx = nextIndex(category);
+        Path file = dir.resolve(String.format("case_%06d.yml", idx));
         StringBuilder extra = new StringBuilder();
-        extra.append("kind: result_mismatch\n");
-        extra.append("traf_columns: ").append(trafCols).append('\n');
-        extra.append("traf_rows:\n");
-        if (trafRows.isEmpty()) {
-            extra.setLength(extra.length() - 1);
-            extra.append(" []\n");
-        } else {
-            for (List<String> r : trafRows) {
-                extra.append("  - [");
-                for (int i = 0; i < r.size(); i++) {
-                    if (i > 0) {
-                        extra.append(", ");
+        extra.append("kind: ").append(category).append('\n');
+        if (dbmsError != null) {
+            extra.append("dbms_error: ").append(yamlScalar(dbmsError)).append('\n');
+        }
+        if (trafError != null) {
+            extra.append("traf_error: ").append(yamlScalar(trafError)).append('\n');
+        }
+        if (trafTrace != null) {
+            extra.append("traf_trace: ").append(yamlScalar(trafTrace)).append('\n');
+        }
+        if (trafCols != null) {
+            extra.append("traf_columns: ").append(trafCols).append('\n');
+            if (trafRows == null || trafRows.isEmpty()) {
+                extra.append("traf_rows: []\n");
+            } else {
+                extra.append("traf_rows:\n");
+                for (List<String> r : trafRows) {
+                    extra.append("  - [");
+                    for (int i = 0; i < r.size(); i++) {
+                        if (i > 0) {
+                            extra.append(", ");
+                        }
+                        extra.append(yamlScalar(r.get(i)));
                     }
-                    extra.append(yamlScalar(r.get(i)));
+                    extra.append("]\n");
                 }
-                extra.append("]\n");
             }
         }
         writeYaml(file, sql, dbmsCols, dbmsRows, extra.toString());
